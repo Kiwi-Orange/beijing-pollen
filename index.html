@@ -5,53 +5,61 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>北京实时花粉指数监测</title>
   <meta name="description" content="北京市16区实时花粉浓度等级监测、24小时逐时趋势与未来分区预报，每小时自动更新。">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header class="site-header">
-    <h1>北京实时花粉指数监测</h1>
-    <p class="subtitle">北京市 16 区 · 逐小时观测 · 每小时自动更新</p>
+  <header class="app-bar">
+    <div class="app-bar-inner">
+      <div class="brand">
+        <span class="brand-icon" aria-hidden="true">🌼</span>
+        <span class="brand-name" data-i18n="appName">北京花粉指数监测</span>
+      </div>
+      <button type="button" id="lang-toggle" class="lang-btn">EN</button>
+    </div>
   </header>
 
   <main class="container">
-    <p id="loading" class="notice">数据加载中…</p>
+    <p id="loading" class="notice" data-i18n="loading">数据加载中…</p>
     <p id="error" class="notice notice-error hidden"></p>
 
     <div id="content" class="hidden">
-      <!-- 全市概况 -->
+      <!-- 全市概况 hero 卡片 -->
       <section class="card overview" id="overview"></section>
 
       <!-- 16区实时 -->
       <section class="card">
-        <h2>16 区实时等级 <span class="hint">点击任意区，查看其 24 小时趋势</span></h2>
+        <h2><span data-i18n="gridTitle">16 区实时等级</span> <span class="hint" data-i18n="gridHint">点击任意区，查看其 24 小时趋势</span></h2>
         <div class="district-grid" id="district-grid"></div>
       </section>
 
       <!-- 24小时趋势 -->
       <section class="card">
-        <h2 id="chart-title">24 小时趋势</h2>
+        <h2 id="chart-title" data-i18n="trendTitle">24 小时趋势</h2>
         <div class="chart" id="chart"></div>
         <p class="advice" id="chart-advice"></p>
       </section>
 
       <!-- 分区预报 -->
       <section class="card">
-        <h2>未来分区预报 <span class="hint">花粉总量等级预报</span></h2>
+        <h2><span data-i18n="forecastTitle">未来分区预报</span> <span class="hint" data-i18n="forecastHint">花粉总量等级预报</span></h2>
         <div id="forecast"></div>
       </section>
 
       <!-- 等级图例 -->
       <section class="card">
-        <h2>等级图例</h2>
+        <h2 data-i18n="legendTitle">等级图例</h2>
         <div id="legend"></div>
       </section>
     </div>
   </main>
 
   <footer class="site-footer">
-    <p>数据来源：<a href="https://pollenwechat.bjpws.com" rel="noopener">北京市花粉监测公共服务平台</a></p>
-    <p>本站为个人非营利信息展示项目，数据仅供参考，不构成医疗建议；花粉过敏人群请遵医嘱做好防护。</p>
-    <p>由 GitHub Actions 每小时自动更新 · 托管于 GitHub Pages</p>
+    <p data-i18n="footerSource">数据来源：<a href="https://pollenwechat.bjpws.com" rel="noopener">北京市花粉监测公共服务平台</a></p>
+    <p data-i18n="footerDisclaimer">本站为个人非营利信息展示项目，数据仅供参考，不构成医疗建议；花粉过敏人群请遵医嘱做好防护。</p>
+    <p data-i18n="footerUpdate">由 GitHub Actions 每小时自动更新 · 托管于 GitHub Pages</p>
   </footer>
 
   <script src="app.js"></script>
