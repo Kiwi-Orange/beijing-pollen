@@ -12,11 +12,10 @@
       error: '数据加载失败（{msg}），请稍后刷新重试。',
       langBtn: 'EN',
       heroSub: '全市花粉等级 {n} 级',
-      avgConc: '全市平均浓度',
       obsTime: '观测时间',
       updated: '数据更新',
       gridTitle: '16 区实时等级',
-      gridHint: '点击任意区，查看其 24 小时趋势',
+      gridHint: '点击地图、卡片或表格中的区，查看其趋势',
       trendTitle: '24 小时趋势',
       trendSuffix: '24 小时逐时趋势',
       forecastTitle: '未来分区预报',
@@ -40,6 +39,15 @@
       legendEstimated: '预测估计',
       estMark: '（估计）',
       chartDisclaimer: '预测为基于历史规律的统计估计，仅供参考',
+      viewCards: '卡片',
+      viewTable: '表格',
+      colName: '区名',
+      colLevel: '等级',
+      colValue: '浓度值',
+      colTime: '观测时间',
+      mapAria: '北京 16 区花粉等级地图',
+      gaugeAria: '全市花粉等级仪表盘',
+      mapError: '地图数据加载失败',
       footerSource: '数据来源：<a href="https://pollenwechat.bjpws.com" rel="noopener">北京市花粉监测公共服务平台</a>',
       footerDisclaimer: '本站为个人非营利信息展示项目，数据仅供参考，不构成医疗建议；花粉过敏人群请遵医嘱做好防护。',
       footerUpdate: '由 GitHub Actions 每小时自动更新 · 托管于 GitHub Pages'
@@ -52,11 +60,10 @@
       error: 'Failed to load data ({msg}). Please refresh and try again.',
       langBtn: '中文',
       heroSub: 'Citywide pollen level {n}',
-      avgConc: 'Citywide avg. concentration',
       obsTime: 'Observed at',
       updated: 'Data updated',
       gridTitle: 'Real-Time Levels by District',
-      gridHint: 'Tap a district to see its 24-hour trend',
+      gridHint: 'Tap a district on the map, cards or table to see its trend',
       trendTitle: '24-Hour Trend',
       trendSuffix: '24-Hour Hourly Trend',
       forecastTitle: 'Forecast by District',
@@ -80,6 +87,15 @@
       legendEstimated: 'Estimated',
       estMark: ' (est.)',
       chartDisclaimer: 'Forecast is a statistical estimate based on historical patterns, for reference only.',
+      viewCards: 'Cards',
+      viewTable: 'Table',
+      colName: 'District',
+      colLevel: 'Level',
+      colValue: 'Conc.',
+      colTime: 'Observed at',
+      mapAria: 'Pollen level map of Beijing\u2019s 16 districts',
+      gaugeAria: 'Citywide pollen level gauge',
+      mapError: 'Failed to load map data',
       footerSource: 'Data source: <a href="https://pollenwechat.bjpws.com" rel="noopener">Beijing Public Pollen Monitoring Service Platform</a>',
       footerDisclaimer: 'This is a personal, non-profit project. Data is for reference only and does not constitute medical advice. If you suffer from pollen allergies, please follow your doctor\u2019s guidance.',
       footerUpdate: 'Auto-updated hourly by GitHub Actions · Hosted on GitHub Pages'
@@ -116,7 +132,11 @@
 
   var LANG = detectLang();
   var currentData = null;
+  var currentGeo = null;
+  var geoError = null;
   var selectedStaId = null;
+  var viewMode = 'grid';                    // 16区视图：grid 卡片 / table 表格（地图常显）
+  var sortState = { key: 'level', dir: -1 };// 表格排序，默认等级降序
 
   function detectLang() {
     try {
@@ -221,17 +241,37 @@
     setLang(LANG === 'zh' ? 'en' : 'zh');
   });
 
-  // 数据由 fetch.py 生成，字段结构见 data/latest.json
-  fetch('data/latest.json?_=' + Date.now())
-    .then(function (resp) {
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
-      return resp.json();
-    })
-    .then(function (data) {
+  // 卡片 / 表格视图切换（地图常显）
+  document.getElementById('view-toggle').addEventListener('click', function (e) {
+    var btn = e.target.closest ? e.target.closest('button[data-view]') : null;
+    if (!btn) return;
+    viewMode = btn.getAttribute('data-view');
+    var btns = this.querySelectorAll('button');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].classList.toggle('active', btns[i] === btn);
+    }
+    document.getElementById('district-grid').classList.toggle('hidden', viewMode !== 'grid');
+    document.getElementById('district-table').classList.toggle('hidden', viewMode !== 'table');
+  });
+
+  // latest.json 由 fetch.py 生成；beijing.geojson 为仓库内静态区界文件（阿里云 DataV）
+  // GeoJSON 加载失败不致命：仅地图区块显示错误，其余内容照常渲染
+  var latestP = fetch('data/latest.json?_=' + Date.now()).then(function (resp) {
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    return resp.json();
+  });
+  var geoP = fetch('data/beijing.geojson').then(function (resp) {
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    return resp.json();
+  }).catch(function (err) { geoError = err; return null; });
+
+  Promise.all([latestP, geoP])
+    .then(function (res) {
       document.getElementById('loading').classList.add('hidden');
       document.getElementById('content').classList.remove('hidden');
-      currentData = data;
-      render(data);
+      currentData = res[0];
+      currentGeo = res[1];
+      render(currentData);
     })
     .catch(function (err) {
       document.getElementById('loading').classList.add('hidden');
@@ -243,25 +283,65 @@
   function render(data) {
     var legendMap = buildLegendMap(data);
     renderOverview(data, legendMap);
+    renderMap(legendMap);
     renderGrid(data, legendMap);
+    renderTable(data, legendMap);
     renderForecast(data, legendMap);
     renderLegend(data, legendMap);
+    markSelected();
+    renderChart();
   }
 
-  /* ---------- 全市概况 ---------- */
+  /* ---------- 全市概况：半圆仪表盘 ---------- */
+  // 指针角度：等级 1 在最左（-72°），等级 5 在最右（+72°），每段 36°
+  function gaugeAngle(level) {
+    return (typeof level === 'number' && level >= 1 && level <= 5) ? (level - 0.5) * 36 - 90 : 0;
+  }
+
   function renderOverview(data, legendMap) {
     var cw = data.citywide || {};
+    var cx = 100, cy = 100, r = 80, gap = 1.5;
+    function pt(deg) {
+      var rad = deg * Math.PI / 180;
+      return (cx + r * Math.cos(rad)).toFixed(2) + ' ' + (cy - r * Math.sin(rad)).toFixed(2);
+    }
+    var arcs = [];
+    for (var i = 0; i < 5; i++) {
+      arcs.push('<path d="M ' + pt(180 - i * 36 - gap) + ' A ' + r + ' ' + r + ' 0 0 1 ' +
+        pt(180 - (i + 1) * 36 + gap) + '" fill="none" stroke="' + esc(levelColor(i + 1, legendMap)) +
+        '" stroke-width="20"/>');
+    }
+    var angle = gaugeAngle(cw.level);
     document.getElementById('overview').innerHTML =
-      '<div class="overview-badge" style="background:' + esc(levelColor(cw.level, legendMap)) + '">' +
-        '<div class="overview-level">' + esc(levelName(cw.level, legendMap)) + '</div>' +
-        '<div class="overview-sub">' + esc(tf('heroSub', { n: cw.level == null ? '-' : cw.level })) + '</div>' +
+      '<div class="gauge-wrap">' +
+        '<svg class="gauge" viewBox="0 0 200 112" role="img" aria-label="' + esc(t('gaugeAria')) + '">' +
+          arcs.join('') +
+          '<g class="gauge-needle" style="transform: rotate(0deg)">' +
+            '<line x1="100" y1="100" x2="100" y2="36" stroke="#202124" stroke-width="3" stroke-linecap="round"/>' +
+          '</g>' +
+          '<circle cx="100" cy="100" r="5" fill="#202124"/>' +
+        '</svg>' +
+      '</div>' +
+      '<div class="gauge-center">' +
+        '<div class="gauge-level">' + esc(levelName(cw.level, legendMap)) + '</div>' +
+        '<div class="overview-sub">' + esc(tf('heroSub', { n: cw.level == null ? '-' : cw.level })) +
+          ' · ' + esc(t('conc')) + ' ' + esc(cw.avgValue == null ? '-' : cw.avgValue) + '</div>' +
       '</div>' +
       '<div class="overview-meta">' +
-        '<span>' + esc(t('avgConc')) + ' <b>' + esc(cw.avgValue == null ? '-' : cw.avgValue) + '</b></span>' +
         '<span>' + esc(t('obsTime')) + ' <b>' + esc(cw.obsTime || '-') + '</b></span>' +
         '<span>' + esc(t('updated')) + ' <b>' + esc(fmtIso(data.updatedAt)) + '</b></span>' +
       '</div>' +
       '<p class="advice">' + esc(levelAdvice(cw.level, legendMap, cw.advice)) + '</p>';
+
+    // 双 rAF 让初始 rotate(0) 先提交，再过渡到目标角度，触发 CSS transition
+    var needle = document.querySelector('#overview .gauge-needle');
+    if (needle) {
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () {
+          needle.style.transform = 'rotate(' + angle + 'deg)';
+        });
+      });
+    }
   }
 
   /* ---------- 16区网格 + 趋势图联动 ---------- */
@@ -292,8 +372,6 @@
       btn.addEventListener('click', function () { selectStation(st.staId); });
       grid.appendChild(btn);
     });
-    markSelected();
-    renderChart();
   }
 
   function selectStation(staId) {
@@ -302,11 +380,198 @@
     renderChart();
   }
 
+  // 卡片、表格行、地图区块三处选中态同步
   function markSelected() {
+    var selName = null;
+    ((currentData && currentData.stations) || []).forEach(function (st) {
+      if (st.staId === selectedStaId) selName = st.staName;
+    });
     var nodes = document.querySelectorAll('.district');
     for (var i = 0; i < nodes.length; i++) {
       nodes[i].classList.toggle('selected', nodes[i].dataset.staId === selectedStaId);
     }
+    var trs = document.querySelectorAll('.district-table tbody tr');
+    for (var j = 0; j < trs.length; j++) {
+      trs[j].classList.toggle('selected', trs[j].getAttribute('data-sta-id') === selectedStaId);
+    }
+    var paths = document.querySelectorAll('.map-path');
+    for (var k = 0; k < paths.length; k++) {
+      paths[k].classList.toggle('selected', paths[k].getAttribute('data-name') === selName);
+    }
+  }
+
+  /* ---------- 北京 16 区地图染色图：纯 SVG，等距圆柱投影 ---------- */
+  function eachCoord(multiPolygon, cb) {
+    multiPolygon.forEach(function (poly) {
+      poly.forEach(function (ring) {
+        ring.forEach(function (pt) { cb(pt[0], pt[1]); });
+      });
+    });
+  }
+
+  // 多边形环质心（鞋带公式）；退化为线/点时回退包围盒中心
+  function ringCentroid(pts) {
+    var a = 0, cx = 0, cy = 0;
+    for (var i = 0; i < pts.length - 1; i++) {
+      var cross = pts[i][0] * pts[i + 1][1] - pts[i + 1][0] * pts[i][1];
+      a += cross;
+      cx += (pts[i][0] + pts[i + 1][0]) * cross;
+      cy += (pts[i][1] + pts[i + 1][1]) * cross;
+    }
+    a /= 2;
+    if (Math.abs(a) < 1e-6) {
+      var xs = pts.map(function (p) { return p[0]; });
+      var ys = pts.map(function (p) { return p[1]; });
+      return { x: (Math.min.apply(null, xs) + Math.max.apply(null, xs)) / 2,
+               y: (Math.min.apply(null, ys) + Math.max.apply(null, ys)) / 2, area: 0 };
+    }
+    return { x: cx / (6 * a), y: cy / (6 * a), area: a };
+  }
+
+  var NAME_ALIAS = {}; // GeoJSON 区名 -> API staName 的别名映射（当前 16 区完全一致，无需别名）
+
+  function renderMap(legendMap) {
+    var mapEl = document.getElementById('map');
+    if (!currentGeo || !currentGeo.features) {
+      mapEl.innerHTML = '<p class="notice">' +
+        esc(geoError ? tf('error', { msg: geoError.message }) : t('mapError')) + '</p>';
+      return;
+    }
+    var byName = {};
+    (currentData.stations || []).forEach(function (st) { byName[st.staName] = st; });
+
+    // 经纬度范围与等距圆柱投影（北京范围小，x 方向乘 cos(中纬) 即可）
+    var minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity;
+    currentGeo.features.forEach(function (f) {
+      eachCoord(f.geometry.coordinates, function (lon, lat) {
+        if (lon < minLon) minLon = lon;
+        if (lon > maxLon) maxLon = lon;
+        if (lat < minLat) minLat = lat;
+        if (lat > maxLat) maxLat = lat;
+      });
+    });
+    var W = 400, H = 400, pad = 10;
+    var cosLat = Math.cos((minLat + maxLat) / 2 * Math.PI / 180);
+    var dx = (maxLon - minLon) * cosLat, dy = maxLat - minLat;
+    var scale = Math.min((W - 2 * pad) / dx, (H - 2 * pad) / dy);
+    var ox = (W - dx * scale) / 2, oy = (H - dy * scale) / 2;
+    function proj(lon, lat) {
+      return [ox + (lon - minLon) * cosLat * scale, oy + (maxLat - lat) * scale];
+    }
+
+    var s = ['<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + esc(t('mapAria')) + '">'];
+    var labels = [];
+    currentGeo.features.forEach(function (f) {
+      var name = NAME_ALIAS[f.properties.name] || f.properties.name;
+      var st = byName[name];
+      var fill = st ? levelColor(st.level, legendMap) : '#e8eaed';
+      var d = '';
+      var best = null;
+      f.geometry.coordinates.forEach(function (poly) {
+        poly.forEach(function (ring, ri) {
+          var pts = ring.map(function (p) { return proj(p[0], p[1]); });
+          d += 'M' + pts.map(function (p) {
+            return p[0].toFixed(1) + ',' + p[1].toFixed(1);
+          }).join('L') + 'Z';
+          if (ri === 0) { // 标签放在最大外环的质心
+            var c = ringCentroid(pts);
+            if (!best || Math.abs(c.area) > Math.abs(best.area)) best = c;
+          }
+        });
+      });
+      s.push('<path class="map-path" data-name="' + esc(name) + '" d="' + d + '" fill="' + esc(fill) +
+        '" fill-rule="evenodd" stroke="#ffffff" stroke-width="1"/>');
+      if (best) labels.push({ name: name, x: best.x, y: best.y });
+    });
+    labels.forEach(function (lb) {
+      s.push('<text x="' + lb.x.toFixed(1) + '" y="' + lb.y.toFixed(1) + '" text-anchor="middle"' +
+        ' font-size="10" fill="#5f6368" pointer-events="none">' + esc(districtName(lb.name)) + '</text>');
+    });
+    s.push('</svg>');
+    mapEl.innerHTML = s.join('');
+
+    // hover tooltip + 点击联动趋势图
+    var tip = document.getElementById('map-tip');
+    var wrap = document.getElementById('map-wrap');
+    Array.prototype.forEach.call(mapEl.querySelectorAll('.map-path'), function (path) {
+      path.addEventListener('mousemove', function (e) {
+        var st = byName[path.getAttribute('data-name')];
+        if (!st) return;
+        tip.innerHTML = '<b>' + esc(districtName(st.staName)) + '</b><br>' +
+          esc(tf('levelFmt', { text: levelName(st.level, legendMap), n: st.level == null ? '-' : st.level })) + '<br>' +
+          esc(t('conc')) + ' ' + esc(st.value == null ? '-' : st.value);
+        tip.classList.remove('hidden');
+        var rect = wrap.getBoundingClientRect();
+        var left = e.clientX - rect.left + 12;
+        var top = e.clientY - rect.top + 12;
+        if (left + tip.offsetWidth > rect.width - 4) left = e.clientX - rect.left - tip.offsetWidth - 8;
+        if (top + tip.offsetHeight > rect.height - 4) top = e.clientY - rect.top - tip.offsetHeight - 8;
+        tip.style.left = left + 'px';
+        tip.style.top = top + 'px';
+      });
+      path.addEventListener('mouseleave', function () { tip.classList.add('hidden'); });
+      path.addEventListener('click', function () {
+        var st = byName[path.getAttribute('data-name')];
+        if (st) selectStation(st.staId);
+      });
+    });
+  }
+
+  /* ---------- 可排序表格视图 ---------- */
+  function renderTable(data, legendMap) {
+    var box = document.getElementById('district-table');
+    var cols = [
+      { key: 'name', label: t('colName') },
+      { key: 'level', label: t('colLevel') },
+      { key: 'value', label: t('colValue') },
+      { key: 'time', label: t('colTime') }
+    ];
+
+    function compare(a, b) {
+      var key = sortState.key, r;
+      if (key === 'name') {
+        r = districtName(a.staName).localeCompare(districtName(b.staName));
+      } else if (key === 'time') {
+        r = String(a.time || '').localeCompare(String(b.time || ''));
+      } else {
+        var va = typeof a[key] === 'number' ? a[key] : -Infinity;
+        var vb = typeof b[key] === 'number' ? b[key] : -Infinity;
+        r = va - vb;
+      }
+      return r * sortState.dir;
+    }
+    var rows = (data.stations || []).slice().sort(compare);
+
+    var arrow = sortState.dir === 1 ? ' ▲' : ' ▼';
+    var html = '<table class="district-table"><thead><tr>' + cols.map(function (c) {
+      return '<th data-key="' + c.key + '">' + esc(c.label) +
+        (sortState.key === c.key ? '<span class="sort-arrow">' + arrow + '</span>' : '') + '</th>';
+    }).join('') + '</tr></thead><tbody>' + rows.map(function (st) {
+      return '<tr data-sta-id="' + esc(st.staId) + '">' +
+        '<td>' + esc(districtName(st.staName)) + '</td>' +
+        '<td><span class="level-badge" style="background:' + esc(levelColor(st.level, legendMap)) + '">' +
+          esc(levelName(st.level, legendMap)) + '</span></td>' +
+        '<td>' + esc(st.value == null ? '-' : st.value) + '</td>' +
+        '<td>' + esc((st.time || '').slice(5, 16)) + '</td>' +
+      '</tr>';
+    }).join('') + '</tbody></table>';
+    box.innerHTML = html;
+
+    Array.prototype.forEach.call(box.querySelectorAll('th'), function (th) {
+      th.addEventListener('click', function () {
+        var key = th.getAttribute('data-key');
+        if (sortState.key === key) {
+          sortState.dir = -sortState.dir;
+        } else {
+          sortState = { key: key, dir: key === 'name' ? 1 : -1 };
+        }
+        renderTable(currentData, legendMap);
+        markSelected();
+      });
+    });
+    Array.prototype.forEach.call(box.querySelectorAll('tbody tr'), function (tr) {
+      tr.addEventListener('click', function () { selectStation(tr.getAttribute('data-sta-id')); });
+    });
   }
 
   /* ---------- 24 小时实测 + 12 小时预测趋势：纯 SVG ---------- */

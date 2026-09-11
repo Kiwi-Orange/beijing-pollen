@@ -29,10 +29,25 @@
       <!-- 全市概况 hero 卡片 -->
       <section class="card overview" id="overview"></section>
 
-      <!-- 16区实时 -->
+      <!-- 16区实时：地图 + 卡片/表格视图 -->
       <section class="card">
-        <h2><span data-i18n="gridTitle">16 区实时等级</span> <span class="hint" data-i18n="gridHint">点击任意区，查看其 24 小时趋势</span></h2>
-        <div class="district-grid" id="district-grid"></div>
+        <div class="section-head">
+          <h2><span data-i18n="gridTitle">16 区实时等级</span> <span class="hint" data-i18n="gridHint">点击任意区，查看其 24 小时趋势</span></h2>
+          <div class="view-toggle" id="view-toggle">
+            <button type="button" data-view="grid" class="active" data-i18n="viewCards">卡片</button>
+            <button type="button" data-view="table" data-i18n="viewTable">表格</button>
+          </div>
+        </div>
+        <div class="district-layout">
+          <div class="map-wrap" id="map-wrap">
+            <div id="map"></div>
+            <div class="map-tip hidden" id="map-tip"></div>
+          </div>
+          <div class="district-views">
+            <div class="district-grid" id="district-grid"></div>
+            <div id="district-table" class="hidden"></div>
+          </div>
+        </div>
       </section>
 
       <!-- 24小时趋势 -->

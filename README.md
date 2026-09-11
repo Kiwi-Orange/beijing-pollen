@@ -25,11 +25,49 @@ python3 -m http.server 8000 # 本地预览
 - 关键接口（最新读数）失败时任务以非零码退出，不覆盖旧数据；其余接口失败时沿用上一份数据
 - 页面展示的所有时间均为北京时间，取自接口原始字符串，未做时区转换
 
-## 预测说明
+## 预测方法 / Forecast Methodology
 
-`fetch.py` 每次运行时会把当次所有实测点累积进 `data/history.json`（按小时去重，只保留最近 7 天），并基于累积历史为每个站点生成未来 12 小时的逐时统计预测（`latest.json` 的 `predictions` 字段）。方法：以昨日同时刻实测值为主信号（反映日变化规律），叠加最近 3 小时线性趋势的衰减修正，两者权重随预测步长从 0.4 渐增至 0.8；缺昨日同时刻数据时回退为持续性外推。预测值的等级按该站历史实测（浓度值, 等级）对做本地校准映射（各等级观测值中位数最近归类），不用官方浓度区间（与站点浓度值量纲不一致）；站点数据不足时依次回退到全局校准和当前实测等级。
+### 中文
 
-**预测为基于历史规律的统计估计，可能与实际有较大偏差，仅供参考，不构成任何防护或医疗依据。**
+**数据来源与累积**：GitHub Actions 每小时运行 `fetch.py`，把 16 个站点的最新读数与 24 小时逐时历史合并进 `data/history.json`，按小时去重排序，只保留最近 7 天。预测所需的长期历史即来自这个滚动累积文件。
+
+**预测公式**：对每个站点，未来第 h 小时（h = 1…12）的浓度预测为
+
+```
+pred(h) = w(h) × 昨日同时刻实测值 + (1 − w(h)) × (当前值 + trend(h))
+trend(h) = slope × Σ(k=0…h−1) 0.7^k        （衰减累积，封顶约 3.3×slope，防发散）
+w(h)     = 0.4 + 0.4 × (h−1)/11            （随步长从 0.4 线性增至 0.8）
+```
+
+- `昨日同时刻实测值`：预测目标时刻 −24h 的历史实测（刻画花粉的日变化规律）；该时刻缺数据时退化为「当前值 + trend(h)」的持续性外推
+- `slope`：最近 3 小时实测值对时间的最小二乘斜率
+- 预测值 clamp 到 [0, 1000]
+
+**等级校准**：站点实测的浓度值（量级 2–30）与官方 legends 的浓度区间（0–100…800+）量纲不一致，直接按区间映射会使预测等级恒为 1。因此改用本地校准：取该站累积历史中每个等级观测值的中位数，按等级顺序单调化后，预测值归入中位数最近的等级。回退链：站点本地校准 → 全局 16 站合并校准 → 该站当前实测等级。
+
+**局限性**：纯统计外推，未考虑降雨、大风冲刷等天气突变；累积历史不足 24 小时时「昨日同时刻」信号缺失，预测以持续性为主；花粉浓度受多种环境因素影响，预测可能与实际有较大偏差。
+
+### English
+
+**Data source & accumulation**: GitHub Actions runs `fetch.py` hourly, merging the latest readings and 24-hour history of all 16 stations into `data/history.json` (deduplicated by hour, rolling 7-day retention). Forecasts are computed from this accumulated history.
+
+**Formula**: for each station, the predicted concentration h hours ahead (h = 1…12) is
+
+```
+pred(h) = w(h) × observed value at the same hour yesterday + (1 − w(h)) × (current value + trend(h))
+trend(h) = slope × Σ(k=0…h−1) 0.7^k        (decaying accumulation, capped ≈ 3.3×slope)
+w(h)     = 0.4 + 0.4 × (h−1)/11            (grows linearly from 0.4 to 0.8 with step)
+```
+
+- The same-hour-yesterday term captures the daily cycle; when missing, the forecast falls back to persistence (current value + trend(h))
+- `slope` is a least-squares fit over the last 3 hours of observations
+- Predictions are clamped to [0, 1000]
+
+**Level calibration**: the observed concentration values (roughly 2–30) do not match the official legend ranges (0–100…800+), so range-based mapping would always yield level 1. Instead, a local calibration is used: for each level, the median of that station's observed values is computed, monotonized in level order, and a predicted value is assigned the level with the nearest median. Fallback chain: per-station calibration → global calibration across all 16 stations → the station's current observed level.
+
+**Limitations**: pure statistical extrapolation; sudden weather changes (rain, strong wind) are not modeled; with less than 24 h of accumulated history the daily-cycle term is unavailable and the forecast is mostly persistence. Actual pollen levels may differ significantly.
+
+**免责声明 / Disclaimer**：预测为基于历史规律的统计估计，仅供参考，不构成任何防护或医疗依据。Forecasts are statistical estimates based on historical patterns, for reference only, and do not constitute medical or protective advice.
 
 ## 免责声明
 
