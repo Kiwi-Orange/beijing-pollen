@@ -77,10 +77,11 @@ w(h)     = 0.4 + 0.4 × (h−1)/11            (grows linearly from 0.4 to 0.8 wi
 
 - `pollen-YYYY-MM.csv`：花粉实测，按观测时间归属月份。列：`time,sta_id,sta_name,lon,lat,level,value`（time 为北京时间 `YYYY-MM-DD HH:00:00`；level 为 1–5 级；value 为花粉浓度）
 - `weather-YYYY-MM.csv`：逐小时气象。列：`time,sta_id,temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m`（单位：°C、%、mm、m/s），只归档不晚于运行时刻的实测部分
+- `daily-index.csv`：**全市逐日花粉指数，已回补 2010-01-01 至今（`backfill_daily.py` 一次性回补，日常增量由 `fetch.py` 维护）**。列：`date,level_code,level,level_msg,color`。level_code 为 0–5（0 未检测到花粉 ~ 5 很高），当日未发布时为 -1 且 level 为「暂无」。注意：此文件为**日级全市口径**（中国天气网与北京同仁医院联合发布），与站点逐时数据（1–5 级）口径不同，分析时应分开处理
 
-**去重与缺口回补**：按 `(sta_id, time)` 去重，每次运行时读取当月已有 CSV、合并新观测后原子重写整月文件；花粉归档同时合并最新读数与 24 小时逐时历史两个来源，因此某次运行失败产生的缺口会在后续运行自动回补。
+**去重与缺口回补**：按 `(sta_id, time)` 去重，每次运行时读取当月已有 CSV、合并新观测后原子重写整月文件；花粉归档同时合并最新读数与 24 小时逐时历史两个来源，因此某次运行失败产生的缺口会在后续运行自动回补。`daily-index.csv` 按 `date` 去重，每次运行合并最近 7 天。
 
-**数据来源**：花粉 — 北京市花粉监测公共服务平台（pollenwechat.bjpws.com）；气象 — Open-Meteo（api.open-meteo.com，免费无需 key，逐站真实经纬度请求）。
+**数据来源**：花粉站点数据 — 北京市花粉监测公共服务平台（pollenwechat.bjpws.com）；逐日指数 — 中国天气网（graph.weatherdt.com）；气象 — Open-Meteo（api.open-meteo.com，免费无需 key，逐站真实经纬度请求）。
 
 **免责与引用建议**：数据为公开接口的原始归档，未做质量控制，使用前请自行检查异常值。引用建议注明「北京市花粉监测公共服务平台」与「Open-Meteo」及本仓库地址。
 
@@ -90,10 +91,11 @@ Besides the website data, each run appends observations to monthly archives unde
 
 - `pollen-YYYY-MM.csv`: pollen observations, filed by observation month. Columns: `time,sta_id,sta_name,lon,lat,level,value` (time is Beijing time `YYYY-MM-DD HH:00:00`; level is 1–5; value is pollen concentration)
 - `weather-YYYY-MM.csv`: hourly weather. Columns: `time,sta_id,temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m` (units: °C, %, mm, m/s); only timestamps up to the run time are archived
+- `daily-index.csv`: **citywide daily pollen index, backfilled from 2010-01-01 to present** (one-off backfill via `backfill_daily.py`; incremental updates maintained by `fetch.py`). Columns: `date,level_code,level,level_msg,color`. `level_code` is 0–5 (0 = none detected, 5 = very high); -1 with level `暂无` means no report published that day. Note this file is a **daily, citywide series** (published by weather.com.cn together with Beijing Tongren Hospital) and uses a different scale than the 5-level station data — analyze them separately.
 
-**Deduplication & gap backfill**: rows are deduplicated by `(sta_id, time)`; each run reads the current month's CSV, merges new observations and atomically rewrites it. Pollen archiving merges both the latest readings and the 24-hour hourly history, so gaps left by a failed run are backfilled automatically on later runs.
+**Deduplication & gap backfill**: rows are deduplicated by `(sta_id, time)`; each run reads the current month's CSV, merges new observations and atomically rewrites it. Pollen archiving merges both the latest readings and the 24-hour hourly history, so gaps left by a failed run are backfilled automatically on later runs. `daily-index.csv` is deduplicated by `date`, merging the last 7 days on every run.
 
-**Sources**: pollen — Beijing Public Pollen Monitoring Service Platform (pollenwechat.bjpws.com); weather — Open-Meteo (api.open-meteo.com, free, no API key; per-station coordinates).
+**Sources**: station pollen data — Beijing Public Pollen Monitoring Service Platform (pollenwechat.bjpws.com); daily index — weather.com.cn (graph.weatherdt.com); weather — Open-Meteo (api.open-meteo.com, free, no API key; per-station coordinates).
 
 **Disclaimer & citation**: the archive is a raw dump of public APIs without quality control — check for outliers before use. When citing, please credit "Beijing Public Pollen Monitoring Service Platform" and "Open-Meteo", and link to this repository.
 

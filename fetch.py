@@ -207,13 +207,68 @@ ARCHIVE_DIR = os.path.join(ROOT, "data", "archive")
 POLLEN_HEADER = ["time", "sta_id", "sta_name", "lon", "lat", "level", "value"]
 WEATHER_HEADER = ["time", "sta_id", "temperature_2m", "relative_humidity_2m", "precipitation", "wind_speed_10m"]
 WEATHER_FIELDS = WEATHER_HEADER[2:]
+DAILY_HEADER = ["date", "level_code", "level", "level_msg", "color"]
+DAILY_URL = ("https://graph.weatherdt.com/ty/pollen/v2/hfindex.html"
+             "?eletype=1&city=beijing&start=%s&end=%s&predictFlag=false")
+DAILY_HISTORY_DAYS = 365  # 写入 latest.json 供前端季节走势的天数
 
 
-def merge_archive(path, header, new_rows):
-    """合并写入月归档 CSV：读已有内容 -> 按 (sta_id, time) 去重（新行优先）-> 原子重写。
-    已有文件损坏/表头不符时打印警告并只写新数据，不崩溃。返回文件总行数。"""
+def parse_date(s):
+    """'YYYY-MM-DD' -> date；解析失败返回 None。"""
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def fetch_daily_index(start, end):
+    """中国天气网逐日花粉指数（原始 JSON，无 code 包装）。
+    返回 {date: [date, level_code, level, level_msg, color]}；'暂无' 等记录原样保留。"""
+    payload = fetch_json(DAILY_URL % (start, end), raw=True)
+    out = {}
+    for item in (payload or {}).get("dataList") or []:
+        date = item.get("addTime")
+        if parse_date(date) is None:
+            continue
+        out[date] = [date, item.get("levelCode"), item.get("level"),
+                     item.get("levelMsg"), item.get("color")]
+    return out
+
+
+def update_daily_archive(now):
+    """合并最近 7 天逐日指数进 daily-index.csv，并返回最近 365 天列表供 latest.json。"""
+    start = (now - timedelta(days=6)).strftime("%Y-%m-%d")
+    end = now.strftime("%Y-%m-%d")
+    new = fetch_daily_index(start, end)
+    path = os.path.join(ARCHIVE_DIR, "daily-index.csv")
+    merge_archive(path, DAILY_HEADER, list(new.values()),
+                  key_fn=lambda r: r[0], sort_fn=lambda r: r[0])
+    cutoff = (now - timedelta(days=DAILY_HISTORY_DAYS)).strftime("%Y-%m-%d")
+    history = []
+    try:
+        with open(path, newline="", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            if next(reader, None) == DAILY_HEADER:
+                for row in reader:
+                    if len(row) == len(DAILY_HEADER) and row[0] >= cutoff:
+                        try:
+                            level_code = int(row[1])
+                        except ValueError:
+                            level_code = None  # '暂无' 等记录 levelCode 缺失，保留原样
+                        history.append({"date": row[0], "levelCode": level_code, "level": row[2]})
+    except Exception as exc:
+        print("读取 daily-index.csv 失败（不致命）: %s" % exc, file=sys.stderr)
+    return history
+
+
+def merge_archive(path, header, new_rows, key_fn=None, sort_fn=None):
+    """合并写入归档 CSV：读已有内容 -> 按键去重（新行优先）-> 原子重写。
+    已有文件损坏/表头不符时打印警告并只写新数据，不崩溃。返回文件总行数。
+    key_fn/sort_fn 作用于字符串化后的行，默认键 (sta_id, time)、按 (time, sta_id) 排序。"""
     if not new_rows:
         return 0
+    key_fn = key_fn or (lambda r: (r[1], r[0]))
+    sort_fn = sort_fn or (lambda r: (r[0], r[1]))
     rows = {}
     if os.path.exists(path):
         try:
@@ -223,18 +278,19 @@ def merge_archive(path, header, new_rows):
                     raise ValueError("表头不符")
                 for row in reader:
                     if len(row) == len(header):
-                        rows[(row[1], row[0])] = row
+                        rows[key_fn(row)] = row
         except Exception as exc:
             print("归档文件损坏，仅用新数据重写 %s: %s" % (os.path.basename(path), exc), file=sys.stderr)
             rows = {}
     for row in new_rows:
-        rows[(str(row[1]), str(row[0]))] = ["" if v is None else v for v in row]
+        row = ["" if v is None else str(v) for v in row]
+        rows[key_fn(row)] = row
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(header)
-        for key in sorted(rows, key=lambda k: (k[1], k[0])):
+        for key in sorted(rows, key=lambda k: sort_fn(rows[k])):
             writer.writerow(rows[key])
     os.replace(tmp, path)
     return len(rows)
@@ -446,6 +502,14 @@ def main():
             print("预测生成失败(staId=%s，不致命): %s" % (st["staId"], exc), file=sys.stderr)
             predictions[st["staId"]] = old_predictions.get(st["staId"], [])
 
+    # 6.5 逐日花粉指数（中国天气网）：合并最近 7 天进 daily-index.csv 归档，
+    #     并取最近 365 天写入 latest.json 供前端季节走势；失败不致命，沿用旧数据
+    try:
+        daily_history = update_daily_archive(now_bj)
+    except Exception as exc:
+        print("逐日指数更新失败（不致命），沿用旧数据: %s" % exc, file=sys.stderr)
+        daily_history = previous.get("dailyHistory") or []
+
     out = {
         "updatedAt": datetime.now(BJT).isoformat(timespec="seconds"),
         "legends": legends,
@@ -454,6 +518,7 @@ def main():
         "citywide": citywide,
         "forecast": forecast,
         "predictions": predictions,
+        "dailyHistory": daily_history,
     }
 
     os.makedirs(os.path.dirname(OUT), exist_ok=True)

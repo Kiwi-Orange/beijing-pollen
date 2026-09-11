@@ -48,6 +48,10 @@
       mapAria: '北京 16 区花粉等级地图',
       gaugeAria: '全市花粉等级仪表盘',
       mapError: '地图数据加载失败',
+      seasonTitle: '季节走势',
+      seasonHint: '今年以来逐日花粉指数（中国天气网，全市日级口径）',
+      seasonAria: '今年以来逐日花粉指数图',
+      naLevel: '暂无',
       footerSource: '数据来源：<a href="https://pollenwechat.bjpws.com" rel="noopener">北京市花粉监测公共服务平台</a>',
       footerDisclaimer: '本站为个人非营利信息展示项目，数据仅供参考，不构成医疗建议；花粉过敏人群请遵医嘱做好防护。',
       footerUpdate: '由 GitHub Actions 每小时自动更新 · 托管于 GitHub Pages'
@@ -96,6 +100,10 @@
       mapAria: 'Pollen level map of Beijing\u2019s 16 districts',
       gaugeAria: 'Citywide pollen level gauge',
       mapError: 'Failed to load map data',
+      seasonTitle: 'Season Trend',
+      seasonHint: 'Daily pollen index this year (weather.com.cn, citywide daily scale)',
+      seasonAria: 'Daily pollen index chart for this year',
+      naLevel: 'N/A',
       footerSource: 'Data source: <a href="https://pollenwechat.bjpws.com" rel="noopener">Beijing Public Pollen Monitoring Service Platform</a>',
       footerDisclaimer: 'This is a personal, non-profit project. Data is for reference only and does not constitute medical advice. If you suffer from pollen allergies, please follow your doctor\u2019s guidance.',
       footerUpdate: 'Auto-updated hourly by GitHub Actions · Hosted on GitHub Pages'
@@ -129,6 +137,12 @@
     en: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
   };
   var MONTHS_EN = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+  // 中国天气网逐日指数的官方 6 级配色（0 未检测到花粉 ~ 5 很高），与站点 5 级口径不同
+  var SEASON_COLORS = { '0': '#999999', '1': '#81CB31', '2': '#A1FF3D', '3': '#F5EE32', '4': '#FFAF13', '5': '#FF2319' };
+  var DAILY_LEVEL_EN = {
+    '0': 'None detected', '1': 'Very Low', '2': 'Low', '3': 'Moderate', '4': 'High', '5': 'Very High'
+  };
 
   var LANG = detectLang();
   var currentData = null;
@@ -290,6 +304,7 @@
     renderLegend(data, legendMap);
     markSelected();
     renderChart();
+    renderSeasonChart(data);
   }
 
   /* ---------- 全市概况：半圆仪表盘 ---------- */
@@ -689,6 +704,79 @@
       '</div>' + s.join('') +
       (nPred ? '<p class="chart-disclaimer">' + esc(t('chartDisclaimer')) + '</p>' : '');
     chartEl.innerHTML = html;
+  }
+
+  /* ---------- 季节走势：今年以来逐日花粉指数 ---------- */
+  // 中国天气网逐日指数的口径是 6 级（0 未检测到 ~ 5 很高），与站点 5 级不同；
+  // levelCode 为 -1/缺失表示当日未发布（"暂无"），画成灰色短柱
+  function seasonLevelCode(r) {
+    var c = r.levelCode;
+    return (typeof c === 'number' && c >= 0 && c <= 5) ? c : -1;
+  }
+
+  function renderSeasonChart(data) {
+    var box = document.getElementById('season-card');
+    var chartEl = document.getElementById('season-chart');
+    var rows = (data.dailyHistory || []).filter(function (r) { return r && r.date; });
+    if (!rows.length) { box.classList.add('hidden'); return; }
+
+    var year = new Date().getFullYear();
+    var curYear = rows.filter(function (r) { return r.date.slice(0, 4) === String(year); });
+    var use = curYear.length >= 60 ? curYear : rows;
+    box.classList.remove('hidden');
+
+    var W = 720, H = 200;
+    var padL = 30, padR = 10, padT = 14, padB = 26;
+    var iw = W - padL - padR, ih = H - padT - padB;
+    var start = new Date(use[0].date + 'T00:00:00');
+    var end = new Date(use[use.length - 1].date + 'T00:00:00');
+    var totalDays = Math.round((end - start) / 86400000) + 1;
+    var bw = iw / totalDays;
+    var msYear = use.length ? use[0].date.slice(0, 4) : '';
+
+    function dayIndex(dateStr) {
+      return Math.round((new Date(dateStr + 'T00:00:00') - start) / 86400000);
+    }
+    function monthLabel(m) {
+      return LANG === 'en' ? MONTHS_EN[m - 1] : m + '月';
+    }
+
+    var s = [];
+    s.push('<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + esc(t('seasonAria')) + '">');
+
+    // 月度网格线与标签
+    var months = [];
+    for (var y0 = +start.getFullYear(); y0 <= +end.getFullYear(); y0++) {
+      for (var m = 1; m <= 12; m++) {
+        var d = new Date(y0, m - 1, 1);
+        if (d < start || d > end) continue;
+        var di = Math.round((d - start) / 86400000);
+        var gx = padL + di * bw;
+        months.push([gx, m, y0]);
+        s.push('<line x1="' + gx.toFixed(1) + '" y1="' + padT + '" x2="' + gx.toFixed(1) +
+          '" y2="' + (padT + ih) + '" stroke="#dadce0" stroke-width="1"/>');
+        s.push('<text x="' + gx.toFixed(1) + '" y="' + (H - 10) + '" text-anchor="middle" font-size="10" fill="#5f6368">' +
+          monthLabel(m) + '</text>');
+      }
+    }
+
+    // 每日柱子：高度按等级缩放（1-5 级 20%~100%），未发布为灰色短柱
+    use.forEach(function (r) {
+      var lc = seasonLevelCode(r);
+      var h = lc >= 0 ? Math.max(0.2, lc / 5) * ih : ih * 0.08;
+      var color = lc >= 0 ? (SEASON_COLORS[lc] || '#999999') : '#dadce0';
+      var di = dayIndex(r.date);
+      var bx = padL + di * bw;
+      var tip = r.date + ' ' + (lc >= 0
+        ? (LANG === 'en' ? (DAILY_LEVEL_EN[lc] || 'Lv' + lc) : r.level)
+        : t('naLevel'));
+      s.push('<rect x="' + (bx + bw * 0.08).toFixed(1) + '" y="' + (padT + ih - h).toFixed(1) +
+        '" width="' + Math.max(0.6, bw * 0.84).toFixed(2) + '" height="' + h.toFixed(1) +
+        '" fill="' + color + '"><title>' + esc(tip) + '</title></rect>');
+    });
+
+    s.push('</svg>');
+    chartEl.innerHTML = s.join('');
   }
 
   /* ---------- 分区预报 ---------- */
