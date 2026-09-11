@@ -35,6 +35,11 @@
       noLegend: '暂无图例数据',
       unknown: '未知',
       ariaChart: '24小时花粉浓度趋势图',
+      now: '现在',
+      legendObserved: '实测',
+      legendEstimated: '预测估计',
+      estMark: '（估计）',
+      chartDisclaimer: '预测为基于历史规律的统计估计，仅供参考',
       footerSource: '数据来源：<a href="https://pollenwechat.bjpws.com" rel="noopener">北京市花粉监测公共服务平台</a>',
       footerDisclaimer: '本站为个人非营利信息展示项目，数据仅供参考，不构成医疗建议；花粉过敏人群请遵医嘱做好防护。',
       footerUpdate: '由 GitHub Actions 每小时自动更新 · 托管于 GitHub Pages'
@@ -70,6 +75,11 @@
       noLegend: 'No legend data available.',
       unknown: 'Unknown',
       ariaChart: '24-hour pollen concentration trend chart',
+      now: 'Now',
+      legendObserved: 'Observed',
+      legendEstimated: 'Estimated',
+      estMark: ' (est.)',
+      chartDisclaimer: 'Forecast is a statistical estimate based on historical patterns, for reference only.',
       footerSource: 'Data source: <a href="https://pollenwechat.bjpws.com" rel="noopener">Beijing Public Pollen Monitoring Service Platform</a>',
       footerDisclaimer: 'This is a personal, non-profit project. Data is for reference only and does not constitute medical advice. If you suffer from pollen allergies, please follow your doctor\u2019s guidance.',
       footerUpdate: 'Auto-updated hourly by GitHub Actions · Hosted on GitHub Pages'
@@ -299,7 +309,7 @@
     }
   }
 
-  /* ---------- 24 小时趋势：纯 SVG ---------- */
+  /* ---------- 24 小时实测 + 12 小时预测趋势：纯 SVG ---------- */
   function renderChart() {
     var chartEl = document.getElementById('chart');
     var adviceEl = document.getElementById('chart-advice');
@@ -319,6 +329,10 @@
       adviceEl.textContent = '';
       return;
     }
+    // 未来 12 小时统计预测；旧数据无 predictions 字段时只画实测
+    var preds = ((currentData.predictions || {})[station.staId] || []).filter(function (r) {
+      return typeof r.value === 'number' && r.time;
+    });
 
     var last = rows[rows.length - 1];
     var advice = levelAdvice(last.level, legendMap, last.advice);
@@ -327,22 +341,33 @@
     var W = 720, H = 260;
     var padL = 36, padR = 14, padT = 16, padB = 34;
     var iw = W - padL - padR, ih = H - padT - padB;
-    var n = rows.length;
-    var maxV = Math.max.apply(null, rows.map(function (r) { return r.value; }));
+    var nObs = rows.length, nPred = preds.length;
+    var total = nObs + nPred;
+    function getV(r) { return r.value; }
+    var maxV = Math.max.apply(null, rows.map(getV).concat(preds.map(getV)));
     var yMax = Math.max(5, Math.ceil(maxV * 1.25));
 
-    function x(i) { return padL + (n === 1 ? iw / 2 : iw * i / (n - 1)); }
+    function x(i) { return padL + (total === 1 ? iw / 2 : iw * i / (total - 1)); }
     function y(v) { return padT + ih * (1 - v / yMax); }
 
     var s = [];
     s.push('<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + esc(t('ariaChart')) + '">');
 
-    // 等级背景色带：每个观测时点一条竖带，按当时等级着色
-    var band = iw / n;
-    rows.forEach(function (r, i) {
+    // 预测区域底色与“现在/Now”分隔线
+    var divX = 0;
+    if (nPred) {
+      divX = (x(nObs - 1) + x(nObs)) / 2;
+      s.push('<rect x="' + divX.toFixed(1) + '" y="' + padT + '" width="' + (W - padR - divX).toFixed(1) +
+        '" height="' + ih + '" fill="#f1f3f4" fill-opacity="0.6"/>');
+    }
+
+    // 等级背景色带：每个时点一条竖带按当时等级着色，预测段更淡
+    var band = iw / total;
+    rows.concat(preds).forEach(function (r, i) {
       var bx = Math.max(padL, Math.min(x(i) - band / 2, W - padR - band));
       s.push('<rect x="' + bx.toFixed(1) + '" y="' + padT + '" width="' + (band + 0.5).toFixed(1) +
-        '" height="' + ih + '" fill="' + esc(levelColor(r.level, legendMap)) + '"/>');
+        '" height="' + ih + '" fill="' + esc(levelColor(r.level, legendMap)) + '"' +
+        (i >= nObs ? ' fill-opacity="0.45"' : '') + '/>');
     });
 
     // 横向网格线与纵轴刻度（Material 风格：浅灰线 #dadce0，文字 #5f6368）
@@ -356,24 +381,49 @@
         Math.round(v) + '</text>');
     }
 
-    // 折线与数据点（Google 蓝）
-    var pts = rows.map(function (r, i) { return x(i).toFixed(1) + ',' + y(r.value).toFixed(1); });
-    s.push('<polyline points="' + pts.join(' ') + '" fill="none" stroke="#1a73e8" stroke-width="2" stroke-linejoin="round"/>');
+    // 实测：实线 + 实心点；预测：虚线（从最后一个实测点连出）+ 半透明点
+    var obsPts = rows.map(function (r, i) { return x(i).toFixed(1) + ',' + y(r.value).toFixed(1); });
+    s.push('<polyline points="' + obsPts.join(' ') + '" fill="none" stroke="#1a73e8" stroke-width="2" stroke-linejoin="round"/>');
+    if (nPred) {
+      var predPts = [x(nObs - 1).toFixed(1) + ',' + y(last.value).toFixed(1)]
+        .concat(preds.map(function (r, j) { return x(nObs + j).toFixed(1) + ',' + y(r.value).toFixed(1); }));
+      s.push('<polyline points="' + predPts.join(' ') + '" fill="none" stroke="#1a73e8" stroke-width="2"' +
+        ' stroke-dasharray="5,4" stroke-linejoin="round"/>');
+    }
     rows.forEach(function (r, i) {
       var tip = tf('tipFmt', { time: r.time, v: r.value, text: levelName(r.level, legendMap), n: r.level });
       s.push('<circle cx="' + x(i).toFixed(1) + '" cy="' + y(r.value).toFixed(1) + '" r="3.2" fill="#1a73e8">' +
         '<title>' + esc(tip) + '</title></circle>');
     });
+    preds.forEach(function (r, j) {
+      var tip = tf('tipFmt', { time: r.time, v: r.value, text: levelName(r.level, legendMap), n: r.level }) + t('estMark');
+      s.push('<circle cx="' + x(nObs + j).toFixed(1) + '" cy="' + y(r.value).toFixed(1) +
+        '" r="2.8" fill="#1a73e8" fill-opacity="0.45"><title>' + esc(tip) + '</title></circle>');
+    });
+
+    if (nPred) {
+      s.push('<line x1="' + divX.toFixed(1) + '" y1="' + padT + '" x2="' + divX.toFixed(1) + '" y2="' + (padT + ih) +
+        '" stroke="#9aa0a6" stroke-width="1" stroke-dasharray="3,3"/>');
+      s.push('<text x="' + divX.toFixed(1) + '" y="11" text-anchor="middle" font-size="10" fill="#5f6368">' +
+        esc(t('now')) + '</text>');
+    }
 
     // 横轴时间标签（"2026-09-10 21:00:00" -> "21:00"），首尾必标，中间每隔3小时
-    rows.forEach(function (r, i) {
-      if (i !== 0 && i !== n - 1 && i % 3 !== 0) return;
+    rows.concat(preds).forEach(function (r, i) {
+      if (i !== 0 && i !== total - 1 && i % 3 !== 0) return;
       s.push('<text x="' + x(i).toFixed(1) + '" y="' + (H - 12) + '" text-anchor="middle" font-size="11" fill="#5f6368">' +
         esc(r.time.slice(11, 16)) + '</text>');
     });
 
     s.push('</svg>');
-    chartEl.innerHTML = s.join('');
+
+    // 小图例 + 预测免责声明
+    var html = '<div class="chart-legend">' +
+      '<span><i class="sw"></i>' + esc(t('legendObserved')) + '</span>' +
+      (nPred ? '<span><i class="sw sw-dashed"></i>' + esc(t('legendEstimated')) + '</span>' : '') +
+      '</div>' + s.join('') +
+      (nPred ? '<p class="chart-disclaimer">' + esc(t('chartDisclaimer')) + '</p>' : '');
+    chartEl.innerHTML = html;
   }
 
   /* ---------- 分区预报 ---------- */
