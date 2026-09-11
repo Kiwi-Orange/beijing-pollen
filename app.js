@@ -15,7 +15,7 @@
       obsTime: '观测时间',
       updated: '数据更新',
       gridTitle: '16 区实时等级',
-      gridHint: '点击地图、卡片或表格中的区，查看其趋势',
+      gridHint: '点击地图上的区或表格行，查看其 24 小时趋势',
       trendTitle: '24 小时趋势',
       trendSuffix: '24 小时逐时趋势',
       forecastTitle: '未来分区预报',
@@ -39,8 +39,8 @@
       legendEstimated: '预测估计',
       estMark: '（估计）',
       chartDisclaimer: '预测为基于历史规律的统计估计，仅供参考',
-      viewCards: '卡片',
-      viewTable: '表格',
+      tableToggle: '对照表格',
+      tableToggleAria: '展开/收起 16 区对照表格',
       colName: '区名',
       colLevel: '等级',
       colValue: '浓度值',
@@ -67,7 +67,7 @@
       obsTime: 'Observed at',
       updated: 'Data updated',
       gridTitle: 'Real-Time Levels by District',
-      gridHint: 'Tap a district on the map, cards or table to see its trend',
+      gridHint: 'Tap a district on the map or a table row to see its trend',
       trendTitle: '24-Hour Trend',
       trendSuffix: '24-Hour Hourly Trend',
       forecastTitle: 'Forecast by District',
@@ -91,8 +91,8 @@
       legendEstimated: 'Estimated',
       estMark: ' (est.)',
       chartDisclaimer: 'Forecast is a statistical estimate based on historical patterns, for reference only.',
-      viewCards: 'Cards',
-      viewTable: 'Table',
+      tableToggle: 'Comparison Table',
+      tableToggleAria: 'Show or hide the 16-district comparison table',
       colName: 'District',
       colLevel: 'Level',
       colValue: 'Conc.',
@@ -149,7 +149,6 @@
   var currentGeo = null;
   var geoError = null;
   var selectedStaId = null;
-  var viewMode = 'grid';                    // 16区视图：grid 卡片 / table 表格（地图常显）
   var sortState = { key: 'level', dir: -1 };// 表格排序，默认等级降序
 
   function detectLang() {
@@ -255,17 +254,13 @@
     setLang(LANG === 'zh' ? 'en' : 'zh');
   });
 
-  // 卡片 / 表格视图切换（地图常显）
-  document.getElementById('view-toggle').addEventListener('click', function (e) {
-    var btn = e.target.closest ? e.target.closest('button[data-view]') : null;
-    if (!btn) return;
-    viewMode = btn.getAttribute('data-view');
-    var btns = this.querySelectorAll('button');
-    for (var i = 0; i < btns.length; i++) {
-      btns[i].classList.toggle('active', btns[i] === btn);
-    }
-    document.getElementById('district-grid').classList.toggle('hidden', viewMode !== 'grid');
-    document.getElementById('district-table').classList.toggle('hidden', viewMode !== 'table');
+  // 对照表格展开/收起
+  document.getElementById('table-toggle').addEventListener('click', function () {
+    var box = document.getElementById('district-table');
+    var nowHidden = box.classList.toggle('hidden');
+    this.setAttribute('aria-expanded', String(!nowHidden));
+    this.setAttribute('aria-label', t('tableToggleAria'));
+    this.classList.toggle('active', !nowHidden);
   });
 
   // latest.json 由 fetch.py 生成；beijing.geojson 为仓库内静态区界文件（阿里云 DataV）
@@ -298,7 +293,7 @@
     var legendMap = buildLegendMap(data);
     renderOverview(data, legendMap);
     renderMap(legendMap);
-    renderGrid(data, legendMap);
+    ensureSelection(data);
     renderTable(data, legendMap);
     renderForecast(data, legendMap);
     renderLegend(data, legendMap);
@@ -359,34 +354,16 @@
     }
   }
 
-  /* ---------- 16区网格 + 趋势图联动 ---------- */
-  function renderGrid(data, legendMap) {
+  /* ---------- 默认选中：当前等级最高的站点 ---------- */
+  function ensureSelection(data) {
     var stations = data.stations || [];
     var valid = stations.some(function (st) { return st.staId === selectedStaId; });
     if (!valid) {
-      // 默认选中当前等级最高的站点
       var def = stations.reduce(function (a, b) {
         return (b.level || 0) > ((a && a.level) || 0) ? b : a;
       }, null);
       selectedStaId = def ? def.staId : null;
     }
-
-    var grid = document.getElementById('district-grid');
-    grid.innerHTML = '';
-    stations.forEach(function (st) {
-      var btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'district';
-      btn.dataset.staId = st.staId;
-      btn.innerHTML =
-        '<span class="d-name">' + esc(districtName(st.staName)) + '</span>' +
-        '<span class="d-level" style="background:' + esc(levelColor(st.level, legendMap)) + '">' +
-          esc(tf('levelFmt', { text: levelName(st.level, legendMap), n: st.level == null ? '-' : st.level })) + '</span>' +
-        '<span class="d-value">' + esc(t('conc')) + ' ' + esc(st.value == null ? '-' : st.value) +
-          ' · ' + esc((st.time || '').slice(11, 16)) + '</span>';
-      btn.addEventListener('click', function () { selectStation(st.staId); });
-      grid.appendChild(btn);
-    });
   }
 
   function selectStation(staId) {
@@ -395,16 +372,12 @@
     renderChart();
   }
 
-  // 卡片、表格行、地图区块三处选中态同步
+  // 表格行与地图区块两处选中态同步
   function markSelected() {
     var selName = null;
     ((currentData && currentData.stations) || []).forEach(function (st) {
       if (st.staId === selectedStaId) selName = st.staName;
     });
-    var nodes = document.querySelectorAll('.district');
-    for (var i = 0; i < nodes.length; i++) {
-      nodes[i].classList.toggle('selected', nodes[i].dataset.staId === selectedStaId);
-    }
     var trs = document.querySelectorAll('.district-table tbody tr');
     for (var j = 0; j < trs.length; j++) {
       trs[j].classList.toggle('selected', trs[j].getAttribute('data-sta-id') === selectedStaId);
@@ -444,6 +417,12 @@
   }
 
   var NAME_ALIAS = {}; // GeoJSON 区名 -> API staName 的别名映射（当前 16 区完全一致，无需别名）
+
+  // 东城/西城面积过小，标签锚点外移（质心坐标见 renderMap 的 400x400 投影，经实测计算避免与相邻区标签重叠）
+  var SMALL_LABEL_ANCHORS = {
+    '东城区': [212, 252],
+    '西城区': [186, 318]
+  };
 
   function renderMap(legendMap) {
     var mapEl = document.getElementById('map');
@@ -499,8 +478,27 @@
       if (best) labels.push({ name: name, x: best.x, y: best.y });
     });
     labels.forEach(function (lb) {
-      s.push('<text x="' + lb.x.toFixed(1) + '" y="' + lb.y.toFixed(1) + '" text-anchor="middle"' +
-        ' font-size="10" fill="#5f6368" pointer-events="none">' + esc(districtName(lb.name)) + '</text>');
+      var st = byName[lb.name];
+      if (!st) return;
+      var halo = ' stroke="#ffffff" stroke-width="3" paint-order="stroke"';
+      var lvText = levelName(st.level, legendMap);
+      var valText = st.value == null ? '-' : String(st.value);
+      var anchor = SMALL_LABEL_ANCHORS[lb.name];
+      if (anchor) {
+        // 东城/西城面积太小：从质心引细引导线，标签放在外侧
+        s.push('<line x1="' + lb.x.toFixed(1) + '" y1="' + lb.y.toFixed(1) + '" x2="' + anchor[0] +
+          '" y2="' + anchor[1] + '" stroke="#9aa0a6" stroke-width="0.8"/>');
+        s.push('<text x="' + anchor[0] + '" y="' + anchor[1] + '" text-anchor="middle" font-size="9.5" font-weight="500"' +
+          ' fill="#202124" pointer-events="none"' + halo + '>' +
+          esc(districtName(lb.name)) + ' · ' + esc(lvText) + ' · ' + esc(valText) + '</text>');
+      } else {
+        s.push('<text x="' + lb.x.toFixed(1) + '" y="' + lb.y.toFixed(1) + '" text-anchor="middle" font-size="10.5"' +
+          ' font-weight="500" fill="#202124" pointer-events="none"' + halo + '>' +
+          esc(districtName(lb.name)) + '</text>');
+        s.push('<text x="' + lb.x.toFixed(1) + '" y="' + (lb.y + 13).toFixed(1) + '" text-anchor="middle"' +
+          ' font-size="9.5" fill="' + esc(levelColor(st.level, legendMap)) + '" pointer-events="none"' + halo + '>' +
+          esc(lvText) + ' · ' + esc(valText) + '</text>');
+      }
     });
     s.push('</svg>');
     mapEl.innerHTML = s.join('');
