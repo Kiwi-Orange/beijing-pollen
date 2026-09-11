@@ -34,18 +34,22 @@ python3 -m http.server 8000 # 本地预览
 **预测公式**：对每个站点，未来第 h 小时（h = 1…12）的浓度预测为
 
 ```
-pred(h) = w(h) × 昨日同时刻实测值 + (1 − w(h)) × (当前值 + trend(h))
+pred(h) = w(h) × 昼夜信号(h) + (1 − w(h)) × (当前值 + trend(h)) × 气象修正(h) + 官方约束
 trend(h) = slope × Σ(k=0…h−1) 0.7^k        （衰减累积，封顶约 3.3×slope，防发散）
 w(h)     = 0.4 + 0.4 × (h−1)/11            （随步长从 0.4 线性增至 0.8）
 ```
 
-- `昨日同时刻实测值`：预测目标时刻 −24h 的历史实测（刻画花粉的日变化规律）；该时刻缺数据时退化为「当前值 + trend(h)」的持续性外推
+- `昼夜信号(h)`：当日已观测小时均值 + 近 7 天平均昼夜曲线在目标整点的偏差（各整点相对当天均值的中位数偏差，见 `build_diurnal_profile`）。相比早期版本「仅用昨日同时刻」，多天中位数对单日异常更稳健；曲线缺该整点数据时回退为昨日同时刻实测值
 - `slope`：最近 3 小时实测值对时间的最小二乘斜率
+- **气象修正**（Open-Meteo 逐时数据，经验系数，论文使用前请自行校准）：最近 6 小时累计降水 ≥ 5 mm 乘 0.35、≥ 1 mm 乘 0.6（雨后冲刷，随步长线性恢复为 1）；未来 12 小时内预报有降水的小时乘 0.75；当前风速 ≥ 6 m/s 乘 0.85（扩散稀释）
+- **官方约束**：落在次日的小时向官方分区预报等级对应的该站典型浓度 nudge 15%（混合系数 0.15；典型浓度来自本地校准的中位数）
 - 预测值 clamp 到 [0, 1000]
 
 **等级校准**：站点实测的浓度值（量级 2–30）与官方 legends 的浓度区间（0–100…800+）量纲不一致，直接按区间映射会使预测等级恒为 1。因此改用本地校准：取该站累积历史中每个等级观测值的中位数，按等级顺序单调化后，预测值归入中位数最近的等级。回退链：站点本地校准 → 全局 16 站合并校准 → 该站当前实测等级。
 
-**局限性**：纯统计外推，未考虑降雨、大风冲刷等天气突变；累积历史不足 24 小时时「昨日同时刻」信号缺失，预测以持续性为主；花粉浓度受多种环境因素影响，预测可能与实际有较大偏差。
+**预测自检（forecastSkill）**：每次运行生成新预测前，把上一份预测与本次刚抓到的实测（history24 + 当前值）按时点配对，计算过去 24 小时预测的平均绝对误差（浓度值 MAE 与等级 MAE），存入 `latest.json` 的 `forecastSkill` 字段并展示在趋势图下方。当前样本量还很小（项目运行数天），数值仅供参考，会随运行时间逐渐稳定。
+
+**局限性**：纯统计外推，气象修正系数为经验值；累积历史不足 24 小时时昼夜信号缺失，预测以持续性为主；花粉浓度受多种环境因素影响，预测可能与实际有较大偏差。
 
 ### English
 
@@ -54,18 +58,22 @@ w(h)     = 0.4 + 0.4 × (h−1)/11            （随步长从 0.4 线性增至 0
 **Formula**: for each station, the predicted concentration h hours ahead (h = 1…12) is
 
 ```
-pred(h) = w(h) × observed value at the same hour yesterday + (1 − w(h)) × (current value + trend(h))
+pred(h) = w(h) × diurnal signal(h) + (1 − w(h)) × (current value + trend(h)) × weather adj.(h) + official nudge
 trend(h) = slope × Σ(k=0…h−1) 0.7^k        (decaying accumulation, capped ≈ 3.3×slope)
 w(h)     = 0.4 + 0.4 × (h−1)/11            (grows linearly from 0.4 to 0.8 with step)
 ```
 
-- The same-hour-yesterday term captures the daily cycle; when missing, the forecast falls back to persistence (current value + trend(h))
+- The `diurnal signal(h)` is today's observed mean plus the deviation of target hour h in a 7-day average diurnal profile (median per-hour anomaly from each day's mean; see `build_diurnal_profile`). Compared with the earlier same-hour-yesterday version, the multi-day median is more robust to single-day anomalies; when the profile lacks that hour, it falls back to the same hour yesterday
 - `slope` is a least-squares fit over the last 3 hours of observations
+- **Weather adjustments** (Open-Meteo hourly data; empirical coefficients — recalibrate before research use): 6-hour accumulated precipitation ≥ 5 mm multiplies by 0.35, ≥ 1 mm by 0.6 (rain washout, recovering linearly to 1 with step); hours with forecast precipitation > 0.5 mm multiply by 0.75; current wind ≥ 6 m/s multiplies by 0.85 (dispersion)
+- **Official nudge**: hours falling on the next day are nudged 15% toward the station's typical concentration for the official district forecast level (typical values come from the local calibration medians)
 - Predictions are clamped to [0, 1000]
 
 **Level calibration**: the observed concentration values (roughly 2–30) do not match the official legend ranges (0–100…800+), so range-based mapping would always yield level 1. Instead, a local calibration is used: for each level, the median of that station's observed values is computed, monotonized in level order, and a predicted value is assigned the level with the nearest median. Fallback chain: per-station calibration → global calibration across all 16 stations → the station's current observed level.
 
-**Limitations**: pure statistical extrapolation; sudden weather changes (rain, strong wind) are not modeled; with less than 24 h of accumulated history the daily-cycle term is unavailable and the forecast is mostly persistence. Actual pollen levels may differ significantly.
+**Forecast self-check (forecastSkill)**: before generating new predictions, each run pairs the previous run's predictions with the freshly fetched observations (24-hour history + current readings) by timestamp and computes the mean absolute error over the last 24 hours (concentration MAE and level MAE). The result is stored in `latest.json` under `forecastSkill` and shown below the trend chart. The sample size is still small (the project has only been running for days); treat the number as indicative — it will stabilize over time.
+
+**Limitations**: pure statistical extrapolation; weather-adjustment coefficients are empirical; with less than 24 h of accumulated history the diurnal signal is unavailable and the forecast is mostly persistence. Actual pollen levels may differ significantly.
 
 **免责声明 / Disclaimer**：预测为基于历史规律的统计估计，仅供参考，不构成任何防护或医疗依据。Forecasts are statistical estimates based on historical patterns, for reference only, and do not constitute medical or protective advice.
 

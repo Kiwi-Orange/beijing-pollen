@@ -39,6 +39,7 @@
       legendEstimated: '预测估计',
       estMark: '（估计）',
       chartDisclaimer: '预测为基于历史规律的统计估计，仅供参考',
+      skillFmt: '过去 24 小时预测平均误差：{mv}（浓度）· {ml}（等级）· {n} 个样本',
       tableToggle: '对照表格',
       tableToggleAria: '展开/收起 16 区对照表格',
       colName: '区名',
@@ -91,6 +92,7 @@
       legendEstimated: 'Estimated',
       estMark: ' (est.)',
       chartDisclaimer: 'Forecast is a statistical estimate based on historical patterns, for reference only.',
+      skillFmt: 'Avg forecast error (last 24 h): {mv} (conc.) · {ml} (level) · {n} samples',
       tableToggle: 'Comparison Table',
       tableToggleAria: 'Show or hide the 16-district comparison table',
       colName: 'District',
@@ -695,12 +697,20 @@
 
     s.push('</svg>');
 
-    // 小图例 + 预测免责声明
+    // 小图例 + 预测免责声明 + 预测自检指标
+    var skill = currentData.forecastSkill;
+    var skillLine = (skill && skill.N) ? '<p class="chart-disclaimer">' +
+      esc(tf('skillFmt', {
+        mv: skill.maeValue == null ? '-' : skill.maeValue,
+        ml: skill.maeLevel == null ? '-' : skill.maeLevel,
+        n: skill.N
+      })) + '</p>' : '';
     var html = '<div class="chart-legend">' +
       '<span><i class="sw"></i>' + esc(t('legendObserved')) + '</span>' +
       (nPred ? '<span><i class="sw sw-dashed"></i>' + esc(t('legendEstimated')) + '</span>' : '') +
       '</div>' + s.join('') +
-      (nPred ? '<p class="chart-disclaimer">' + esc(t('chartDisclaimer')) + '</p>' : '');
+      (nPred ? '<p class="chart-disclaimer">' + esc(t('chartDisclaimer')) + '</p>' : '') +
+      skillLine;
     chartEl.innerHTML = html;
   }
 

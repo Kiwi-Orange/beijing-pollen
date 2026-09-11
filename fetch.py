@@ -87,6 +87,11 @@ def calibrate_level_fn(pairs):
     def to_level(value):
         return min(zip(medians, levels), key=lambda m: abs(m[0] - value))[1]
 
+    def typical(level):
+        return to_level.medians.get(int(level))
+
+    to_level.medians = dict(zip(levels, medians))
+    to_level.typical = typical
     return to_level
 
 
@@ -147,16 +152,85 @@ def update_history(old, stations, histories, now):
     return {sid: [pts[k] for k in sorted(pts)] for sid, pts in merged.items()}
 
 
-def predict_station(station, rows, level_fn):
+def build_diurnal_profile(rows):
+    """从站点累积历史构建昼夜曲线：各整点(0-23时)相对当天均值的偏差，多天同整点取中位数。
+
+    返回 (profile, day_count)：profile 为 {hour: anomaly}，数据不足时可能为空字典；
+    day_count 为可用完整天（>=12 个整点观测）的数量，供调用方判断稳健性。
+    """
+    days = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        dt = parse_time(r.get("time"))
+        v = r.get("value")
+        if dt is not None and isinstance(v, (int, float)):
+            days.setdefault(dt.date(), {})[dt.hour] = v
+    profile = {}
+    day_count = 0
+    for hours in days.values():
+        if len(hours) >= 12:
+            day_count += 1
+    if day_count:
+        for h in range(24):
+            vals = []
+            for hours in days.values():
+                if len(hours) >= 12 and h in hours:
+                    mean = sum(hours.values()) / len(hours)
+                    vals.append(hours[h] - mean)
+            if vals:
+                vals.sort()
+                mid = len(vals) // 2
+                profile[h] = vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
+    return profile, day_count
+
+
+def weather_modifiers(payload, now):
+    """从 Open-Meteo 逐时响应提取预测修正因子（经验系数，论文使用前需自行校准）。
+
+    返回 (rain_factor, wind_factor, rainy_hours)：
+    - rain_factor：最近 6 小时累计降水 >= 5mm 取 0.35，>= 1mm 取 0.6，否则 1（雨后冲刷）
+    - wind_factor：当前风速 >= 6 m/s 取 0.85，否则 1（扩散稀释）
+    - rainy_hours：未来 12 小时内降水 > 0.5mm 的整点集合（这些小时再乘 0.75）
+    解析失败或数据缺失时返回 (1.0, 1.0, set())，即无修正。
+    """
+    try:
+        hourly = (payload or {}).get("hourly") or {}
+        times = hourly.get("time") or []
+        prec = hourly.get("precipitation") or []
+        wind = hourly.get("wind_speed_10m") or []
+        pts = []
+        for i, ts in enumerate(times):
+            dt = parse_time(str(ts).replace("T", " ") + ":00")
+            if dt is None:
+                continue
+            p = prec[i] if isinstance(prec, list) and i < len(prec) and isinstance(prec[i], (int, float)) else 0.0
+            w = wind[i] if isinstance(wind, list) and i < len(wind) and isinstance(wind[i], (int, float)) else 0.0
+            pts.append((dt, p, w))
+        if not pts:
+            return 1.0, 1.0, set()
+        rain6 = sum(p for dt, p, w in pts if 0 <= (now - dt).total_seconds() <= 6 * 3600)
+        rain_factor = 0.35 if rain6 >= 5 else (0.6 if rain6 >= 1 else 1.0)
+        cur_wind = max((w for dt, p, w in pts if abs((now - dt).total_seconds()) <= 3600), default=0.0)
+        wind_factor = 0.85 if cur_wind >= 6 else 1.0
+        rainy = set(dt for dt, p, w in pts if 0 < (dt - now).total_seconds() <= 12 * 3600 and p > 0.5)
+        return rain_factor, wind_factor, rainy
+    except Exception:
+        return 1.0, 1.0, set()
+
+
+def predict_station(station, rows, level_fn, profile=None, wmod=None, hint_value=None):
     """统计预测未来 12 小时逐时浓度（纯统计估计，仅供参考）。
 
-    方法：pred(h) = w * 昨日同时刻实测值 + (1 - w) * (当前值 + 衰减趋势)
-    - 主信号：昨日同时刻（预测目标时刻 -24h）的实测值，反映花粉的日变化规律
-    - 修正项：最近 3 小时实测的最小二乘斜率，按 TREND_DECAY^k 随步长累积衰减，
-      越远的预测步趋势权重越小，避免线性外推发散
-    - w 随步长 h 从 0.4 渐增至 0.8：越往后越信日变化规律
-    - 缺昨日同时刻数据时回退为持续性 + 衰减趋势
-    - 预测值 clamp 到 [0, 1000]，等级由 level_fn（本地校准，见 calibrate_level_fn）映射
+    方法：pred(h) = w·昼夜信号 + (1-w)·(当前值 + 衰减趋势)，再叠加气象修正与官方预报约束。
+    - 昼夜信号：当日已观测均值 + 近 7 天平均昼夜曲线在目标整点的偏差（build_diurnal_profile）；
+      曲线缺失时回退为昨日同时刻实测值
+    - 趋势修正：最近 3 小时实测的最小二乘斜率，按 TREND_DECAY^k 随步长累积衰减，避免发散
+    - w 随步长 h 从 0.4 渐增至 0.8：越往后越信昼夜规律
+    - 气象修正（经验系数）：雨后冲刷 rain_factor 随步长线性恢复为 1；未来有降水的小时乘 0.75；
+      大风扩散 wind_factor 恒定作用于全部步
+    - 官方预报约束：落在次日的小时向官方预报等级对应的典型浓度 nudge 15%（hint_value 为 None 则跳过）
+    - 预测值 clamp 到 [0, 1000]，等级由 level_fn（本地校准）映射
     """
     pts = []
     for r in rows:
@@ -175,6 +249,14 @@ def predict_station(station, rows, level_fn):
     t0 = max(by_time)
     v0 = by_time[t0]
 
+    # 当日均值（当天 0 点起已观测小时）；不足时回退近 24h 均值、再退回当前值
+    today = [v for dt, v in pts if dt.date() == t0.date()]
+    if today:
+        day_mean = sum(today) / len(today)
+    else:
+        recent24 = [v for dt, v in pts if 0 <= (t0 - dt).total_seconds() <= 24 * 3600]
+        day_mean = (sum(recent24) / len(recent24)) if recent24 else v0
+
     # 最近 3 小时实测的最小二乘斜率（单位：浓度/小时；点数不足则为 0）
     recent = [(dt, v) for dt, v in pts if 0 <= (t0 - dt).total_seconds() <= 3 * 3600]
     slope = 0.0
@@ -186,14 +268,27 @@ def predict_station(station, rows, level_fn):
         if denom > 0:
             slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / denom
 
+    rain_factor, wind_factor, rainy_hours = wmod if wmod else (1.0, 1.0, set())
     out = []
     for h in range(1, FORECAST_STEPS + 1):
         target = t0 + timedelta(hours=h)
         w = 0.4 + 0.4 * (h - 1) / (FORECAST_STEPS - 1)
         trend = slope * sum(TREND_DECAY ** k for k in range(h))
         persistence = v0 + trend
-        yest = by_time.get(target - timedelta(hours=24))
-        pred = w * yest + (1 - w) * persistence if yest is not None else persistence
+        if profile and target.hour in profile:
+            diurnal = day_mean + profile[target.hour]
+        else:
+            yest = by_time.get(target - timedelta(hours=24))
+            diurnal = yest if yest is not None else persistence
+        pred = w * diurnal + (1 - w) * persistence
+        # 气象修正：雨后冲刷随步长线性恢复（h=1 时近全效，h=12 时基本复原）
+        rf = 1.0 + (rain_factor - 1.0) * (1 - h / (FORECAST_STEPS + 1))
+        pred *= rf * wind_factor
+        if target in rainy_hours:
+            pred *= 0.75
+        # 官方次日预报约束：轻微 nudge 15%
+        if hint_value is not None:
+            pred += 0.15 * (hint_value - pred)
         value = round(min(1000.0, max(0.0, pred)), 1)
         out.append({
             "time": target.strftime("%Y-%m-%d %H:%M:%S"),
@@ -322,20 +417,17 @@ def archive_pollen(stations, histories):
     print("花粉归档完成：%s" % ", ".join(files))
 
 
-def archive_weather(stations, now):
+def archive_weather(stations, now, payloads):
     """Open-Meteo 逐小时气象（免费、无需 key）归档到 weather-YYYY-MM.csv。
-    只保留 <= 当前时刻的部分；整体或单站失败均不致命，单站失败跳过。"""
+    使用 main() 已抓取的 payloads（与预测共用），只保留 <= 当前时刻的部分；
+    单站缺失跳过，整体失败不致命。"""
     added = 0
     for st in stations:
         sid = st["staId"]
-        lon, lat = st.get("lon"), st.get("lat")
-        if not isinstance(lon, (int, float)) or not isinstance(lat, (int, float)):
+        payload = payloads.get(sid)
+        if payload is None:
             continue
-        url = ("https://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s"
-               "&hourly=%s&timezone=Asia%%2FShanghai&past_days=2&forecast_days=1"
-               % (lat, lon, ",".join(WEATHER_FIELDS)))
         try:
-            payload = fetch_json(url, raw=True)
             hourly = (payload or {}).get("hourly") or {}
             times = hourly.get("time") or []
             by_month = {}
@@ -354,8 +446,7 @@ def archive_weather(stations, now):
                 merge_archive(os.path.join(ARCHIVE_DIR, "weather-%s.csv" % month), WEATHER_HEADER, rows)
                 added += len(rows)
         except Exception as exc:
-            print("Open-Meteo 站点 %s 失败，跳过: %s" % (sid, exc), file=sys.stderr)
-        time.sleep(0.5)
+            print("Open-Meteo 站点 %s 归档失败，跳过: %s" % (sid, exc), file=sys.stderr)
     print("气象归档完成：本次归档 %d 点（%d 站）" % (added, len(stations)))
 
 
@@ -478,10 +569,72 @@ def main():
         print("forecast 接口失败，沿用旧数据: %s" % exc, file=sys.stderr)
         forecast = previous.get("forecast") or []
 
-    # 6. 统计预测未来 12 小时（方法见 predict_station 注释；纯统计估计，仅供参考）
-    #    预测值定级用本地校准：站点自身历史 (value, level) 对 -> 全局所有站点 -> 当前实测等级
+    # 5.5 气象数据（Open-Meteo）：预测修正与归档共用，整体失败不致命
+    weather_payloads = {}
+    for st in stations:
+        sid = st["staId"]
+        lon, lat = st.get("lon"), st.get("lat")
+        if not isinstance(lon, (int, float)) or not isinstance(lat, (int, float)):
+            continue
+        try:
+            weather_payloads[sid] = fetch_json(
+                "https://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s"
+                "&hourly=%s&timezone=Asia%%2FShanghai&past_days=2&forecast_days=1"
+                % (lat, lon, ",".join(WEATHER_FIELDS)), raw=True)
+        except Exception as exc:
+            print("Open-Meteo 站点 %s 失败（不致命）: %s" % (sid, exc), file=sys.stderr)
+        time.sleep(0.5)
+
+    # 6.0 预测自检：上一份预测 vs 本次实测（history24 + 当前值），配对计算平均误差
+    prev_preds = previous.get("predictions") or {}
+    prev_skill = previous.get("forecastSkill") or {}
+    errs_v, errs_l, n_pairs = [], [], 0
+    obs_map = {}
+    for st in stations:
+        m = {}
+        for r in histories.get(st["staId"]) or []:
+            m[r.get("time")] = (r.get("value"), r.get("level"))
+        if st.get("time"):
+            m[st["time"]] = (st.get("value"), st.get("level"))
+        obs_map[st["staId"]] = m
+    for sid, preds in prev_preds.items():
+        m = obs_map.get(sid) or {}
+        for p in preds:
+            if not isinstance(p, dict) or parse_time(p.get("time")) is None:
+                continue
+            if parse_time(p["time"]) > now_bj:
+                continue
+            obs = m.get(p["time"])
+            if not obs or not isinstance(p.get("value"), (int, float)):
+                continue
+            ov, ol = obs
+            if isinstance(ov, (int, float)):
+                errs_v.append(abs(p["value"] - ov))
+                n_pairs += 1
+            if isinstance(ol, (int, float)) and isinstance(p.get("level"), (int, float)):
+                errs_l.append(abs(p["level"] - ol))
+    if n_pairs:
+        forecast_skill = {
+            "checkedAt": datetime.now(BJT).isoformat(timespec="seconds"),
+            "N": n_pairs,
+            "maeValue": round(sum(errs_v) / len(errs_v), 1) if errs_v else None,
+            "maeLevel": round(sum(errs_l) / len(errs_l), 2) if errs_l else None,
+        }
+        print("预测自检：配对 %d 点，MAE(浓度)=%s，MAE(等级)=%s" % (
+            n_pairs, forecast_skill["maeValue"], forecast_skill["maeLevel"]))
+    else:
+        forecast_skill = prev_skill
+
     global_fn = calibrate_level_fn(
         (r.get("value"), r.get("level")) for rows in history.values() for r in rows)
+    # 官方次日分区预报 -> 站点：对次日时段的预测做约束 nudge
+    tomorrow = (now_bj + timedelta(days=1)).strftime("%Y-%m-%d")
+    hint_by_area = {}
+    for day in forecast:
+        if day.get("date") == tomorrow:
+            for a in (day.get("areas") or []):
+                if a.get("areaName") and isinstance(a.get("level"), (int, float)):
+                    hint_by_area[a["areaName"]] = min(int(a["level"]), 5)
     predictions = {}
     old_predictions = previous.get("predictions") or {}
     for st in stations:
@@ -497,7 +650,17 @@ def main():
                     return fallback(v)
                 return cur
 
-            predictions[st["staId"]] = predict_station(st, history.get(st["staId"]) or [], level_fn)
+            profile, _ = build_diurnal_profile(history.get(st["staId"]) or [])
+            wmod = weather_modifiers(weather_payloads.get(st["staId"]), now_bj)
+            hint_value = None
+            hint_lv = hint_by_area.get(st.get("staName"))
+            if hint_lv is not None:
+                typ = getattr(local_fn, "typical", None) or getattr(global_fn, "typical", None)
+                if typ is not None:
+                    hint_value = typ(hint_lv)
+            predictions[st["staId"]] = predict_station(
+                st, history.get(st["staId"]) or [], level_fn,
+                profile=profile or None, wmod=wmod, hint_value=hint_value)
         except Exception as exc:
             print("预测生成失败(staId=%s，不致命): %s" % (st["staId"], exc), file=sys.stderr)
             predictions[st["staId"]] = old_predictions.get(st["staId"], [])
@@ -518,6 +681,7 @@ def main():
         "citywide": citywide,
         "forecast": forecast,
         "predictions": predictions,
+        "forecastSkill": forecast_skill,
         "dailyHistory": daily_history,
     }
 
@@ -547,7 +711,7 @@ def main():
     except Exception as exc:
         print("花粉归档失败（不致命）: %s" % exc, file=sys.stderr)
     try:
-        archive_weather(stations, now_bj)
+        archive_weather(stations, now_bj, weather_payloads)
     except Exception as exc:
         print("气象归档失败（不致命）: %s" % exc, file=sys.stderr)
     return 0
