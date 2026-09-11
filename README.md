@@ -69,6 +69,34 @@ w(h)     = 0.4 + 0.4 × (h−1)/11            (grows linearly from 0.4 to 0.8 wi
 
 **免责声明 / Disclaimer**：预测为基于历史规律的统计估计，仅供参考，不构成任何防护或医疗依据。Forecasts are statistical estimates based on historical patterns, for reference only, and do not constitute medical or protective advice.
 
+## 科研数据归档 / Research Data Archive
+
+### 中文
+
+每次运行除生成网站数据外，还会把实测数据追加归档到 `data/archive/`，供科研分析长期使用：
+
+- `pollen-YYYY-MM.csv`：花粉实测，按观测时间归属月份。列：`time,sta_id,sta_name,lon,lat,level,value`（time 为北京时间 `YYYY-MM-DD HH:00:00`；level 为 1–5 级；value 为花粉浓度）
+- `weather-YYYY-MM.csv`：逐小时气象。列：`time,sta_id,temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m`（单位：°C、%、mm、m/s），只归档不晚于运行时刻的实测部分
+
+**去重与缺口回补**：按 `(sta_id, time)` 去重，每次运行时读取当月已有 CSV、合并新观测后原子重写整月文件；花粉归档同时合并最新读数与 24 小时逐时历史两个来源，因此某次运行失败产生的缺口会在后续运行自动回补。
+
+**数据来源**：花粉 — 北京市花粉监测公共服务平台（pollenwechat.bjpws.com）；气象 — Open-Meteo（api.open-meteo.com，免费无需 key，逐站真实经纬度请求）。
+
+**免责与引用建议**：数据为公开接口的原始归档，未做质量控制，使用前请自行检查异常值。引用建议注明「北京市花粉监测公共服务平台」与「Open-Meteo」及本仓库地址。
+
+### English
+
+Besides the website data, each run appends observations to monthly archives under `data/archive/` for long-term research use:
+
+- `pollen-YYYY-MM.csv`: pollen observations, filed by observation month. Columns: `time,sta_id,sta_name,lon,lat,level,value` (time is Beijing time `YYYY-MM-DD HH:00:00`; level is 1–5; value is pollen concentration)
+- `weather-YYYY-MM.csv`: hourly weather. Columns: `time,sta_id,temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m` (units: °C, %, mm, m/s); only timestamps up to the run time are archived
+
+**Deduplication & gap backfill**: rows are deduplicated by `(sta_id, time)`; each run reads the current month's CSV, merges new observations and atomically rewrites it. Pollen archiving merges both the latest readings and the 24-hour hourly history, so gaps left by a failed run are backfilled automatically on later runs.
+
+**Sources**: pollen — Beijing Public Pollen Monitoring Service Platform (pollenwechat.bjpws.com); weather — Open-Meteo (api.open-meteo.com, free, no API key; per-station coordinates).
+
+**Disclaimer & citation**: the archive is a raw dump of public APIs without quality control — check for outliers before use. When citing, please credit "Beijing Public Pollen Monitoring Service Platform" and "Open-Meteo", and link to this repository.
+
 ## 免责声明
 
 本站为个人非营利信息展示项目，数据仅供参考，不构成医疗建议。

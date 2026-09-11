@@ -6,6 +6,7 @@
 其余接口失败时沿用上一份 latest.json 中对应部分（若有）。
 """
 
+import csv
 import json
 import os
 import sys
@@ -27,14 +28,17 @@ FORECAST_STEPS = 12  # 预测未来小时数
 TREND_DECAY = 0.7    # 趋势修正随预测步长的衰减系数
 
 
-def fetch_json(url):
-    """GET JSON，15s 超时，最多 3 次重试，指数退避。成功返回 data 字段。"""
+def fetch_json(url, raw=False):
+    """GET JSON，15s 超时，最多 3 次重试，指数退避。
+    raw=False 时返回包装内的 data 字段（花粉平台）；raw=True 返回整个响应体（Open-Meteo 等）。"""
     last_err = None
     for attempt in range(RETRIES):
         try:
             req = urllib.request.Request(url, headers=HEADERS)
             with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
+            if raw:
+                return payload
             if payload.get("code") != 200:
                 raise ValueError("code=%r msg=%r" % (payload.get("code"), payload.get("msg")))
             return payload.get("data")
@@ -197,6 +201,106 @@ def predict_station(station, rows, level_fn):
             "value": value,
         })
     return out
+
+
+ARCHIVE_DIR = os.path.join(ROOT, "data", "archive")
+POLLEN_HEADER = ["time", "sta_id", "sta_name", "lon", "lat", "level", "value"]
+WEATHER_HEADER = ["time", "sta_id", "temperature_2m", "relative_humidity_2m", "precipitation", "wind_speed_10m"]
+WEATHER_FIELDS = WEATHER_HEADER[2:]
+
+
+def merge_archive(path, header, new_rows):
+    """合并写入月归档 CSV：读已有内容 -> 按 (sta_id, time) 去重（新行优先）-> 原子重写。
+    已有文件损坏/表头不符时打印警告并只写新数据，不崩溃。返回文件总行数。"""
+    if not new_rows:
+        return 0
+    rows = {}
+    if os.path.exists(path):
+        try:
+            with open(path, newline="", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                if next(reader, None) != header:
+                    raise ValueError("表头不符")
+                for row in reader:
+                    if len(row) == len(header):
+                        rows[(row[1], row[0])] = row
+        except Exception as exc:
+            print("归档文件损坏，仅用新数据重写 %s: %s" % (os.path.basename(path), exc), file=sys.stderr)
+            rows = {}
+    for row in new_rows:
+        rows[(str(row[1]), str(row[0]))] = ["" if v is None else v for v in row]
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        for key in sorted(rows, key=lambda k: (k[1], k[0])):
+            writer.writerow(rows[key])
+    os.replace(tmp, path)
+    return len(rows)
+
+
+def archive_pollen(stations, histories):
+    """把本次所有实测点（当前值 + 每站 24h 逐时历史）按月归档到 pollen-YYYY-MM.csv。
+    两个来源合并去重，可在某次运行失败时回补缺口。"""
+    meta = {st["staId"]: st for st in stations}
+    by_month = {}
+
+    def add(sid, time_str, level, value):
+        if parse_time(time_str) is None or not isinstance(value, (int, float)):
+            return
+        st = meta.get(sid) or {}
+        row = [time_str, sid, st.get("staName"), st.get("lon"), st.get("lat"), level, value]
+        by_month.setdefault(time_str[:7], []).append(row)
+
+    for st in stations:
+        add(st["staId"], st.get("time"), st.get("level"), st.get("value"))
+    for sid, rows in (histories or {}).items():
+        for r in rows:
+            add(sid, r.get("time"), r.get("level"), r.get("value"))
+
+    files = []
+    for month, rows in sorted(by_month.items()):
+        n = merge_archive(os.path.join(ARCHIVE_DIR, "pollen-%s.csv" % month), POLLEN_HEADER, rows)
+        files.append("pollen-%s.csv(%d 行)" % (month, n))
+    print("花粉归档完成：%s" % ", ".join(files))
+
+
+def archive_weather(stations, now):
+    """Open-Meteo 逐小时气象（免费、无需 key）归档到 weather-YYYY-MM.csv。
+    只保留 <= 当前时刻的部分；整体或单站失败均不致命，单站失败跳过。"""
+    added = 0
+    for st in stations:
+        sid = st["staId"]
+        lon, lat = st.get("lon"), st.get("lat")
+        if not isinstance(lon, (int, float)) or not isinstance(lat, (int, float)):
+            continue
+        url = ("https://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s"
+               "&hourly=%s&timezone=Asia%%2FShanghai&past_days=2&forecast_days=1"
+               % (lat, lon, ",".join(WEATHER_FIELDS)))
+        try:
+            payload = fetch_json(url, raw=True)
+            hourly = (payload or {}).get("hourly") or {}
+            times = hourly.get("time") or []
+            by_month = {}
+            for i, ts in enumerate(times):
+                # timezone=Asia/Shanghai 返回北京本地时间 "2026-09-11T09:00"，转成与花粉一致的格式
+                dt = parse_time(str(ts).replace("T", " ") + ":00")
+                if dt is None or dt > now:
+                    continue  # 未来时刻不归档
+                time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+                row = [time_str, sid]
+                for f_ in WEATHER_FIELDS:
+                    vals = hourly.get(f_)
+                    row.append(vals[i] if isinstance(vals, list) and i < len(vals) else None)
+                by_month.setdefault(time_str[:7], []).append(row)
+            for month, rows in by_month.items():
+                merge_archive(os.path.join(ARCHIVE_DIR, "weather-%s.csv" % month), WEATHER_HEADER, rows)
+                added += len(rows)
+        except Exception as exc:
+            print("Open-Meteo 站点 %s 失败，跳过: %s" % (sid, exc), file=sys.stderr)
+        time.sleep(0.5)
+    print("气象归档完成：本次归档 %d 点（%d 站）" % (added, len(stations)))
 
 
 def main():
@@ -370,6 +474,17 @@ def main():
     print("站点 %d 个（历史序列 %d 个成功），预报 %d 天；累积历史 %d 点，预测 %d/%d 站点 -> %s" % (
         len(stations), ok_hist, len(forecast), hist_points, ok_pred,
         len(stations), os.path.relpath(OUT, ROOT)))
+
+    # 7. 科研数据归档（花粉 + 气象）。在 latest.json 成功写入后执行；
+    #    归档失败绝不影响网站数据，仅打印警告。
+    try:
+        archive_pollen(stations, histories)
+    except Exception as exc:
+        print("花粉归档失败（不致命）: %s" % exc, file=sys.stderr)
+    try:
+        archive_weather(stations, now_bj)
+    except Exception as exc:
+        print("气象归档失败（不致命）: %s" % exc, file=sys.stderr)
     return 0
 
 
