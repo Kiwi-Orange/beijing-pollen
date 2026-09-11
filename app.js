@@ -688,9 +688,18 @@
         esc(t('now')) + '</text>');
     }
 
-    // 横轴时间标签（"2026-09-10 21:00:00" -> "21:00"），首尾必标，中间每隔3小时
+    // 横轴时间标签（"2026-09-10 21:00:00" -> "21:00"），首尾必标，中间每隔3小时；
+    // 过滤掉与相邻标签间隔 < 2 个点的中间标签，避免"每隔3点"与"末尾必标"撞车（如 06:00 与 07:00 重叠）
+    var labelIdx = [];
+    for (var li = 0; li < total; li += 3) labelIdx.push(li);
+    if (labelIdx[labelIdx.length - 1] !== total - 1) labelIdx.push(total - 1);
+    for (var k = labelIdx.length - 2; k >= 1; k--) {
+      if (labelIdx[k] - labelIdx[k - 1] < 3 || labelIdx[k + 1] - labelIdx[k] < 3) {
+        labelIdx.splice(k, 1);
+      }
+    }
     rows.concat(preds).forEach(function (r, i) {
-      if (i !== 0 && i !== total - 1 && i % 3 !== 0) return;
+      if (labelIdx.indexOf(i) === -1) return;
       s.push('<text x="' + x(i).toFixed(1) + '" y="' + (H - 12) + '" text-anchor="middle" font-size="11" fill="#5f6368">' +
         esc(r.time.slice(11, 16)) + '</text>');
     });
